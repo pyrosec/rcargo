@@ -23,6 +23,15 @@ use rcargo_client::{project_key_for, Config, SshTransport, Transport};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// Selected transport for this invocation. `Ssh` is always available; the
+/// WebTransport variant only links when the `webtransport` feature is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TransportChoice {
+    #[default]
+    Ssh,
+    WebTransport,
+}
+
 const HELP: &str = r#"
 rcargo — drop-in cargo replacement that runs cargo on a remote host.
 
@@ -33,6 +42,13 @@ RCARGO FLAGS:
     --rcargo-host <HOST>          Override RCARGO_HOST / config file host.
     --rcargo-remote-root <PATH>   Override remote root directory.
     --rcargo-pull-artifacts       After build, rsync target/release artifacts back.
+    --rcargo-transport <KIND>     `ssh` (default) or `webtransport` (requires
+                                  the binary to be built with `--features
+                                  webtransport` and rcargod's `--wt-listen`).
+    --rcargo-wt-host <HOST>       Host part of the WebTransport URL (default:
+                                  same as --rcargo-host).
+    --rcargo-wt-port <PORT>       Port of the WebTransport listener (default:
+                                  7475 — distinct from the JSON-line 7474).
     --rcargo-local                Bypass rcargo entirely; exec local `cargo`.
     --rcargo-explain-config       Print effective config and exit.
     --rcargo-version              Print version and exit.
@@ -64,6 +80,12 @@ struct ParsedArgs {
     print_version: bool,
     print_help: bool,
     cargo_args: Vec<String>,
+    /// Selected transport. Defaults to ssh; `--rcargo-transport=webtransport`
+    /// flips it. WT is only buildable with `--features webtransport`.
+    transport_choice: TransportChoice,
+    /// WT-specific overrides. None = use cfg.host / default port.
+    wt_host: Option<String>,
+    wt_port: Option<u16>,
 }
 
 fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<ParsedArgs> {
@@ -93,6 +115,27 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<ParsedArgs> {
             "--rcargo-pull-artifacts" => {
                 out.pull_artifacts_flag = true;
                 out.cli_overrides.pull_artifacts = Some(true);
+            }
+            "--rcargo-transport" => {
+                let v = it.next().context("--rcargo-transport requires a value")?;
+                out.transport_choice = match v.as_str() {
+                    "ssh" => TransportChoice::Ssh,
+                    "webtransport" | "wt" => TransportChoice::WebTransport,
+                    other => anyhow::bail!(
+                        "unknown transport `{other}` (expected `ssh` or `webtransport`)"
+                    ),
+                };
+            }
+            "--rcargo-wt-host" => {
+                let v = it.next().context("--rcargo-wt-host requires a value")?;
+                out.wt_host = Some(v);
+            }
+            "--rcargo-wt-port" => {
+                let v = it.next().context("--rcargo-wt-port requires a value")?;
+                let port: u16 = v
+                    .parse()
+                    .with_context(|| format!("--rcargo-wt-port `{v}` is not a u16"))?;
+                out.wt_port = Some(port);
             }
             "--rcargo-local" => {
                 out.local = true;
@@ -166,7 +209,7 @@ async fn run() -> Result<i32> {
 
     let (mut cfg, sources) =
         Config::load().context("loading rcargo config (env + ./rcargo.toml + user file)")?;
-    cfg.apply_overrides(parsed.cli_overrides);
+    cfg.apply_overrides(parsed.cli_overrides.clone());
     sanity_check(&cfg)?;
 
     if parsed.explain_config {
@@ -191,11 +234,12 @@ async fn run() -> Result<i32> {
 
     let pwd: PathBuf = std::env::current_dir().context("getting current dir")?;
     let key = project_key_for(&pwd);
-    let transport = Transport::Ssh(SshTransport::new(cfg.clone()));
+
+    let transport = build_transport(&parsed, &cfg)?;
 
     eprintln!(
-        "rcargo: host={} project={} (cd to ./{}/ on remote)",
-        cfg.host, key, key
+        "rcargo: host={} project={} (cd to ./{}/ on remote) transport={:?}",
+        cfg.host, key, key, parsed.transport_choice
     );
     eprintln!("rcargo: syncing source tree...");
     transport.sync_up(&pwd, &key).await?;
@@ -209,6 +253,35 @@ async fn run() -> Result<i32> {
     }
 
     Ok(outcome.exit_code)
+}
+
+/// Compose the [`Transport`] enum based on the user's `--rcargo-transport`
+/// choice. WebTransport is only available when the binary was built with
+/// `--features webtransport`; otherwise we error out at parse-time with a
+/// clear message rather than silently falling back to ssh.
+fn build_transport(parsed: &ParsedArgs, cfg: &Config) -> Result<Transport> {
+    match parsed.transport_choice {
+        TransportChoice::Ssh => Ok(Transport::Ssh(SshTransport::new(cfg.clone()))),
+        TransportChoice::WebTransport => {
+            #[cfg(feature = "webtransport")]
+            {
+                let wt_host = parsed.wt_host.clone().unwrap_or_else(|| cfg.host.clone());
+                let wt_port = parsed.wt_port.unwrap_or(7475);
+                Ok(Transport::WebTransport(
+                    rcargo_client::WebTransportTransport::new(cfg.clone(), wt_host, wt_port),
+                ))
+            }
+            #[cfg(not(feature = "webtransport"))]
+            {
+                let _ = parsed;
+                let _ = cfg;
+                anyhow::bail!(
+                    "this rcargo build does not include the webtransport feature; \
+                     rebuild with `cargo build --features webtransport -p rcargo-cli`"
+                )
+            }
+        }
+    }
 }
 
 /// `--local` escape hatch: exec system cargo with the captured args.

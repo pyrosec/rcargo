@@ -10,6 +10,9 @@ pub mod transport;
 #[cfg(feature = "webtransport")]
 pub mod webtransport_stub;
 
+#[cfg(feature = "webtransport")]
+pub use webtransport_stub::WebTransportTransport;
+
 pub use config::{Config, ConfigFile, ConfigSources};
 pub use project_key::project_key_for;
 pub use transport::{ssh::SshTransport, Transport, TransportOutcome};

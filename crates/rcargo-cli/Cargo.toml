@@ -9,6 +9,12 @@ description = "Drop-in cargo replacement that offloads builds to a remote host."
 name = "rcargo"
 path = "src/main.rs"
 
+[features]
+default = []
+# Mirror of rcargo-client's webtransport feature — forwards to the
+# client crate. Enables the `--rcargo-transport=webtransport` flag.
+webtransport = ["rcargo-client/webtransport"]
+
 [dependencies]
 rcargo-client = { path = "../rcargo-client" }
 clap.workspace = true

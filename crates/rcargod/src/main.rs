@@ -31,12 +31,22 @@ use tokio::sync::mpsc;
 #[command(name = "rcargod", about = "rcargo remote build daemon (v2)")]
 struct Args {
     /// Run in stdio mode — read JSON-line Requests on stdin, write Events on stdout.
-    #[arg(long, conflicts_with = "listen")]
+    #[arg(long, conflicts_with_all = ["listen", "wt_listen"])]
     stdio: bool,
 
     /// Listen on a TCP socket and serve one client per connection.
     #[arg(long, value_name = "ADDR")]
     listen: Option<String>,
+
+    /// Listen on a WebTransport endpoint and serve each bidi stream as one
+    /// rcargo session. Requires the `webtransport` feature; uses a
+    /// self-signed certificate generated at startup. The cert's SHA-256
+    /// is logged to stderr on bind for out-of-band pinning. v2 dev-only:
+    /// production deployments should front this with a real cert via a
+    /// reverse proxy or wire SPKI pinning end-to-end.
+    #[cfg(feature = "webtransport")]
+    #[arg(long, value_name = "ADDR")]
+    wt_listen: Option<String>,
 
     /// Parent directory under which project trees live. Same convention as
     /// the client's RCARGO_REMOTE_ROOT.
@@ -64,26 +74,188 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Some(addr) = args.listen {
-        let listener = TcpListener::bind(&addr)
-            .await
-            .with_context(|| format!("bind {addr}"))?;
-        tracing::info!("rcargod listening on {addr}");
-        loop {
-            let (sock, peer) = listener.accept().await.context("accept")?;
-            tracing::info!("connection from {peer}");
-            let root = remote_root.clone();
-            tokio::spawn(async move {
-                let (r, w) = sock.into_split();
-                if let Err(e) = serve_one(r, w, root).await {
-                    tracing::warn!("session ended with error: {e:#}");
-                }
-            });
-        }
+    // Coalesce all listener modes into a Vec<JoinHandle<_>> so the same
+    // binary can serve TCP and WT simultaneously (or either alone).
+    let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+    if let Some(addr) = args.listen.clone() {
+        let root = remote_root.clone();
+        let h = tokio::spawn(async move {
+            if let Err(e) = serve_tcp(addr, root).await {
+                tracing::error!("tcp listener died: {e:#}");
+            }
+        });
+        handles.push(h);
     }
 
-    eprintln!("rcargod: pass --stdio or --listen <addr>. See --help.");
-    std::process::exit(2);
+    #[cfg(feature = "webtransport")]
+    if let Some(addr) = args.wt_listen.clone() {
+        let root = remote_root.clone();
+        let h = tokio::spawn(async move {
+            if let Err(e) = serve_wt(addr, root).await {
+                tracing::error!("wt listener died: {e:#}");
+            }
+        });
+        handles.push(h);
+    }
+
+    if handles.is_empty() {
+        eprintln!(
+            "rcargod: pass --stdio, --listen <addr>, or --wt-listen <addr>. See --help."
+        );
+        std::process::exit(2);
+    }
+
+    // Wait for any listener to die — if one does, exit so systemd restarts.
+    let (res, _, _) = futures_select(handles).await;
+    if let Err(e) = res {
+        tracing::error!("listener task panicked: {e}");
+    }
+    Ok(())
+}
+
+/// Wait for the first task in `handles` to finish and return its result.
+/// (Stand-in for `futures::future::select_all` without bringing in the
+/// futures crate just for this.)
+async fn futures_select<T>(
+    handles: Vec<tokio::task::JoinHandle<T>>,
+) -> (
+    Result<T, tokio::task::JoinError>,
+    usize,
+    Vec<tokio::task::JoinHandle<T>>,
+)
+where
+    T: 'static,
+{
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct SelectAll<T> {
+        inner: Vec<tokio::task::JoinHandle<T>>,
+    }
+    impl<T: 'static> Future for SelectAll<T> {
+        type Output = (
+            Result<T, tokio::task::JoinError>,
+            usize,
+            Vec<tokio::task::JoinHandle<T>>,
+        );
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            for (i, h) in self.inner.iter_mut().enumerate() {
+                if let Poll::Ready(res) = Pin::new(h).poll(cx) {
+                    let mut remaining = std::mem::take(&mut self.inner);
+                    remaining.swap_remove(i);
+                    return Poll::Ready((res, i, remaining));
+                }
+            }
+            Poll::Pending
+        }
+    }
+    SelectAll { inner: handles }.await
+}
+
+/// Plain TCP listener — the original `--listen` path, factored out of `main`.
+async fn serve_tcp(addr: String, remote_root: String) -> Result<()> {
+    let listener = TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind {addr}"))?;
+    tracing::info!("rcargod TCP listening on {addr}");
+    loop {
+        let (sock, peer) = listener.accept().await.context("accept")?;
+        tracing::info!("connection from {peer}");
+        let root = remote_root.clone();
+        tokio::spawn(async move {
+            let (r, w) = sock.into_split();
+            if let Err(e) = serve_one(r, w, root).await {
+                tracing::warn!("session ended with error: {e:#}");
+            }
+        });
+    }
+}
+
+/// WebTransport listener — generates a self-signed cert at startup, logs
+/// its SHA-256 (so a client can pin it out of band), and spawns one
+/// `serve_one` per inbound bidirectional stream.
+///
+/// Wire format on each bi stream is identical to TCP/stdio (line-delimited
+/// JSON Request → Event stream → Exit). `wtransport`'s SendStream/RecvStream
+/// impl tokio's AsyncRead/AsyncWrite directly, so `serve_one` plugs right in.
+#[cfg(feature = "webtransport")]
+async fn serve_wt(addr: String, remote_root: String) -> Result<()> {
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    let sock_addr: SocketAddr = SocketAddr::from_str(&addr)
+        .with_context(|| format!("--wt-listen address {addr} must be an IP:port"))?;
+
+    let identity = wtransport::Identity::self_signed(["localhost", "127.0.0.1", "::1"])
+        .context("generate self-signed WT identity")?;
+    // Log the leaf cert's SHA-256 so a client can pin it out of band.
+    // For multi-host certs (the SANs above) we still only have one leaf;
+    // there's exactly one cert in the chain.
+    for cert in identity.certificate_chain().as_slice() {
+        let hash = cert.hash();
+        let hash_hex = hex::encode(hash.as_ref());
+        tracing::warn!(
+            "rcargod WT self-signed leaf cert sha256={} (pin this in clients for production)",
+            hash_hex
+        );
+    }
+
+    let server_config = wtransport::ServerConfig::builder()
+        .with_bind_address(sock_addr)
+        .with_identity(identity)
+        .keep_alive_interval(Some(Duration::from_secs(3)))
+        .build();
+    let endpoint = wtransport::Endpoint::server(server_config)
+        .with_context(|| format!("bind WT endpoint on {sock_addr}"))?;
+    tracing::info!("rcargod WebTransport listening on {sock_addr}");
+
+    loop {
+        let incoming = endpoint.accept().await;
+        let root = remote_root.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_wt_session(incoming, root).await {
+                tracing::warn!("wt session ended with error: {e:#}");
+            }
+        });
+    }
+}
+
+/// Walk wtransport's three-stage accept (Incoming → SessionRequest → Connection),
+/// then loop on `accept_bi` and dispatch each bi stream to a fresh `serve_one`.
+#[cfg(feature = "webtransport")]
+async fn handle_wt_session(
+    incoming: wtransport::endpoint::IncomingSession,
+    remote_root: String,
+) -> Result<()> {
+    let session_req = incoming.await.context("wt incoming")?;
+    tracing::info!(
+        "wt session: authority={:?} path={:?}",
+        session_req.authority(),
+        session_req.path()
+    );
+    let conn = session_req.accept().await.context("wt session accept")?;
+    loop {
+        let stream = conn.accept_bi().await;
+        let (send, recv) = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::info!("wt session closed by peer: {e}");
+                return Ok(());
+            }
+        };
+        let root = remote_root.clone();
+        tokio::spawn(async move {
+            // wtransport's SendStream/RecvStream impl tokio AsyncRead/Write;
+            // serve_one is shape-generic over those, so we can call it
+            // directly with no adapter.
+            if let Err(e) = serve_one(recv, send, root).await {
+                tracing::warn!("wt stream ended with error: {e:#}");
+            }
+        });
+    }
 }
 
 /// Serve a single client until they hang up or send `Bye`. Reads `Request`s

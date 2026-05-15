@@ -132,13 +132,57 @@ gigantic and you want to trim more, set `RCARGO_RSYNC_ARGS` and add
   v1. Speaks a line-delimited JSON protocol on stdio or a TCP socket.
 - **`rcargo-proto`** — shared serde types for the daemon protocol.
 
-### v2 plans
+### v2 — WebTransport transport (experimental)
 
-The v2 transport speaks the `rcargod` protocol over WebTransport via
-`tlsfetch` (HTTP/3). This eliminates the per-build ssh handshake (~200ms)
-and gives us a persistent multiplexed channel. The skeleton is in
-`crates/rcargo-client/src/webtransport_stub.rs` (compiled only with
-`--features webtransport`). v1 ships standalone; v2 is additive.
+`rcargo-cli` and `rcargod` both grow a `webtransport` feature that
+speaks the same JSON-line protocol as the TCP path, but over a
+WebTransport (QUIC + h3) bidirectional stream via the vendored
+`tlsfetch-wt` stack.
+
+Build the client with WT enabled:
+
+```bash
+cargo build --features webtransport -p rcargo-cli
+```
+
+Build and run the daemon with WT enabled (and keep the TCP listener for
+backwards compat):
+
+```bash
+cargo build --release --features webtransport -p rcargod
+~/.local/bin/rcargod --listen 127.0.0.1:7474 --wt-listen 0.0.0.0:7475
+```
+
+The daemon generates a self-signed certificate at startup and logs its
+SHA-256 to stderr (`rcargod WT self-signed leaf cert sha256=...`). The
+v2 client trusts any cert (`insecure: true`) — adequate for a private
+LAN dev box, NOT for the public internet. SPKI pinning via
+`tlsfetch-pin` is a follow-up.
+
+Use from the CLI:
+
+```bash
+rcargo --rcargo-transport webtransport \
+       --rcargo-wt-host 192.168.10.140 \
+       --rcargo-wt-port 7475 \
+       check -p mycrate
+```
+
+The WT transport currently only handles the build-stream phase. Source
+upload and artifact pull-back still go over ssh+rsync via the existing
+`Config::host` — that's by design (rsync's delta transfer is more
+valuable than fronting it on WT for v2).
+
+**Path-dep caveat** — `rcargo-client` and `rcargod` use path deps to
+the local `/home/ubuntu/tlsfetch` checkout under their `webtransport`
+features. Cargo validates path deps at manifest-load time even for
+optional/feature-gated entries, so any host that runs `cargo` against
+the rcargo source tree must have `/home/ubuntu/tlsfetch` present (or
+the manifest patched out). This breaks the meta-recursive "rcargo
+builds rcargo through rcargo" test on hosts without tlsfetch. Two
+options for publishing to crates.io: (a) replace the path deps with a
+pinned git rev pointing at a public tlsfetch fork, or (b) hoist the
+WT-impl into a separate crate that lives outside this workspace.
 
 ## Testing
 

@@ -16,27 +16,37 @@ pub struct TransportOutcome {
     pub exit_code: i32,
 }
 
-/// The choice of transport. Today only `Ssh`; tomorrow `WebTransport`.
+/// The choice of transport. v1 is `Ssh`; v2 (gated behind the
+/// `webtransport` feature) adds `WebTransport`. Enum dispatch keeps the
+/// dep graph small for crates that don't enable WT.
 pub enum Transport {
     Ssh(ssh::SshTransport),
+    #[cfg(feature = "webtransport")]
+    WebTransport(crate::webtransport_stub::WebTransportTransport),
 }
 
 impl Transport {
     pub async fn sync_up(&self, local_root: &Path, project_key: &str) -> Result<()> {
         match self {
             Transport::Ssh(t) => t.sync_up(local_root, project_key).await,
+            #[cfg(feature = "webtransport")]
+            Transport::WebTransport(t) => t.sync_up(local_root, project_key).await,
         }
     }
 
     pub async fn run_cargo(&self, project_key: &str, args: &[String]) -> Result<TransportOutcome> {
         match self {
             Transport::Ssh(t) => t.run_cargo(project_key, args).await,
+            #[cfg(feature = "webtransport")]
+            Transport::WebTransport(t) => t.run_cargo(project_key, args).await,
         }
     }
 
     pub async fn pull_artifacts(&self, local_root: &Path, project_key: &str) -> Result<()> {
         match self {
             Transport::Ssh(t) => t.pull_artifacts(local_root, project_key).await,
+            #[cfg(feature = "webtransport")]
+            Transport::WebTransport(t) => t.pull_artifacts(local_root, project_key).await,
         }
     }
 }

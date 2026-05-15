@@ -9,6 +9,22 @@ description = "Long-running rcargo daemon. Scaffolded for v2; not yet enabled by
 name = "rcargod"
 path = "src/main.rs"
 
+[features]
+default = []
+# Same `webtransport` feature gate as rcargo-client — enables a
+# `--wt-listen <addr>` flag that fronts the same JSON-line protocol over
+# a WebTransport bidi stream instead of (or in addition to) plain TCP.
+# Requires the local tlsfetch checkout; see the client crate's Cargo.toml
+# for the publishing caveat.
+webtransport = [
+    "dep:tlsfetch-wt",
+    "dep:tlsfetch-transport",
+    "dep:wtransport",
+    "dep:bytes",
+    "dep:futures",
+    "dep:hex",
+]
+
 [dependencies]
 rcargo-proto = { path = "../rcargo-proto" }
 clap.workspace = true
@@ -18,3 +34,13 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Optional — only under the `webtransport` feature. Path deps mirror
+# rcargo-client so the two halves of the protocol pick up the same
+# tlsfetch version at the same time.
+tlsfetch-wt = { path = "/home/ubuntu/tlsfetch/crates/tlsfetch-wt", default-features = false, features = ["native", "self-signed"], optional = true }
+tlsfetch-transport = { path = "/home/ubuntu/tlsfetch/crates/tlsfetch-transport", optional = true }
+wtransport = { path = "/home/ubuntu/tlsfetch/crates/wtransport", default-features = false, features = ["ring", "self-signed"], optional = true }
+bytes = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }

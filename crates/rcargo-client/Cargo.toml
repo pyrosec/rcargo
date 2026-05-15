@@ -8,8 +8,14 @@ description = "Client library for rcargo: rsync+ssh transport (v1) and WebTransp
 [features]
 default = []
 # v2: speak to rcargod over WebTransport via tlsfetch. Disabled by default —
-# requires tlsfetch crates to be on disk relative to the rcargo repo.
-webtransport = []
+# requires the local tlsfetch checkout at /home/ubuntu/tlsfetch via path
+# dep. When rcargo is eventually published to crates.io this dep needs to
+# be repinned to a git rev or a registry version; see README.
+webtransport = [
+    "dep:tlsfetch-wt",
+    "dep:tlsfetch-transport",
+    "dep:url",
+]
 
 [dependencies]
 rcargo-proto = { path = "../rcargo-proto" }
@@ -26,6 +32,13 @@ dirs.workspace = true
 which.workspace = true
 bytes.workspace = true
 futures.workspace = true
+
+# Optional — only pulled in under the `webtransport` feature. Path dep for
+# now because both rcargo and tlsfetch live in this dev environment.
+# Publishing rcargo to crates.io requires repinning to git rev or registry.
+tlsfetch-wt = { path = "/home/ubuntu/tlsfetch/crates/tlsfetch-wt", default-features = false, features = ["native"], optional = true }
+tlsfetch-transport = { path = "/home/ubuntu/tlsfetch/crates/tlsfetch-transport", optional = true }
+url = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
