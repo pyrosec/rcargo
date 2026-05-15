@@ -1,0 +1,22 @@
+[package]
+name = "rcargo-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Drop-in cargo replacement that offloads builds to a remote host."
+
+[[bin]]
+name = "rcargo"
+path = "src/main.rs"
+
+[dependencies]
+rcargo-client = { path = "../rcargo-client" }
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

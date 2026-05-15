@@ -1,0 +1,31 @@
+[package]
+name = "rcargo-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Client library for rcargo: rsync+ssh transport (v1) and WebTransport stub (v2)."
+
+[features]
+default = []
+# v2: speak to rcargod over WebTransport via tlsfetch. Disabled by default —
+# requires tlsfetch crates to be on disk relative to the rcargo repo.
+webtransport = []
+
+[dependencies]
+rcargo-proto = { path = "../rcargo-proto" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+dirs.workspace = true
+which.workspace = true
+bytes.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,10 @@
+[package]
+name = "rcargo-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared protocol types for rcargo client/daemon."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

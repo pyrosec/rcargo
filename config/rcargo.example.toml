@@ -1,0 +1,25 @@
+# Example rcargo config. Copy to either:
+#   - ./rcargo.toml                       (per-project)
+#   - ~/.config/rcargo/config.toml        (per-user)
+#
+# Precedence (highest first):
+#   CLI flag > env var > ./rcargo.toml > ~/.config/rcargo/config.toml > defaults
+
+# SSH destination. May be `user@host`, a bare hostname, or a ~/.ssh/config alias.
+host = "meta"
+
+# Parent directory on the remote that holds per-project build trees. Each
+# project gets its own subdirectory (named with a deterministic hash) so
+# multiple projects share one remote root without colliding.
+remote_root = "~/rcargo-builds"
+
+# Optional: extra args to pass to `ssh`. Whitespace-split.
+# ssh_args = "-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30"
+
+# Optional: extra args to pass to `rsync`. Whitespace-split.
+# rsync_args = "--exclude=fixtures/large/"
+
+# If true, after a successful build rcargo will rsync target/release/* (and
+# common target/<triple>/release/*) back to the local target/ so the local
+# toolchain can see the artifacts.
+# pull_artifacts = false

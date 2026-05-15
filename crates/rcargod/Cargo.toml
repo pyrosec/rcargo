@@ -1,0 +1,20 @@
+[package]
+name = "rcargod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Long-running rcargo daemon. Scaffolded for v2; not yet enabled by default."
+
+[[bin]]
+name = "rcargod"
+path = "src/main.rs"
+
+[dependencies]
+rcargo-proto = { path = "../rcargo-proto" }
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,7 @@
+target/
+/local-config.toml
+**/*.rs.bk
+.DS_Store
+*.swp
+.env
+.env.local
