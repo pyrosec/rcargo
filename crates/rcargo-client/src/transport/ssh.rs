@@ -53,7 +53,7 @@ impl SshTransport {
             .arg("--")
             .arg(format!(
                 "mkdir -p {}/{}",
-                shell_quote(&self.cfg.remote_root),
+                shell_quote_path(&self.cfg.remote_root),
                 shell_quote(project_key),
             ))
             .stdin(Stdio::null())
@@ -219,10 +219,18 @@ impl SshTransport {
 /// Compose the remote shell command line. We `cd` into the project tree and
 /// then run cargo with whatever args the user gave us. Args are quoted to
 /// survive the trip through ssh's single-string command.
+///
+/// The remote_root and project_key go through [`shell_quote_path`] so that
+/// a leading `~/` is preserved as an unquoted tilde — POSIX shells only
+/// expand `~` when it's at the start of an *unquoted* word, so naively
+/// quoting `~/rcargo-builds` produces a literal `~` directory at the wrong
+/// path. This was a real bug discovered against `meta` / `lowbot` on
+/// 2026-05-15 (rsync expanded `~` correctly via its own ssh invocation but
+/// the subsequent `cd '~/rcargo-builds/key'` did not).
 pub fn build_remote_cargo_cmd(remote_root: &str, project_key: &str, args: &[String]) -> String {
     let mut cmd = format!(
         "cd {}/{} && cargo",
-        shell_quote(remote_root),
+        shell_quote_path(remote_root),
         shell_quote(project_key)
     );
     for a in args {
@@ -259,6 +267,24 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
+/// Like [`shell_quote`], but preserves a leading `~/` or bare `~` unquoted
+/// so the remote shell will tilde-expand it to `$HOME`. The portion after
+/// the tilde is quoted via [`shell_quote`] for safety. For paths without a
+/// leading tilde this is identical to [`shell_quote`].
+pub fn shell_quote_path(s: &str) -> String {
+    if s == "~" {
+        return "~".to_string();
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        // Avoid producing `~/''` for the degenerate `~/` input.
+        if rest.is_empty() {
+            return "~/".to_string();
+        }
+        return format!("~/{}", shell_quote(rest));
+    }
+    shell_quote(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,8 +295,34 @@ mod tests {
         assert_eq!(shell_quote("foo bar"), "'foo bar'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("~/builds"), "'~/builds'"); // ~ expansion intentionally NOT preserved
+        // Generic shell_quote still quotes tildes literally — only the
+        // path-aware variant peels the leading `~/` off so the remote
+        // shell expands it. shell_quote remains unchanged so other
+        // callers don't suddenly start emitting unquoted tildes.
+        assert_eq!(shell_quote("~/builds"), "'~/builds'");
         assert_eq!(shell_quote("a=b"), "a=b");
+    }
+
+    #[test]
+    fn shell_quote_path_preserves_leading_tilde() {
+        // The bug this fixes: POSIX shells (sh/bash/zsh/dash) only
+        // tilde-expand at the start of an *unquoted* word. Wrapping
+        // `~/rcargo-builds` in single quotes produces a literal `~`
+        // directory at the wrong path. Verified against meta + lowbot
+        // on 2026-05-15.
+        assert_eq!(shell_quote_path("~/rcargo-builds"), "~/rcargo-builds");
+        // Spaces still need quoting on the tail side.
+        assert_eq!(shell_quote_path("~/dir with space"), "~/'dir with space'");
+        // Bare tilde stays bare.
+        assert_eq!(shell_quote_path("~"), "~");
+        // Trailing slash without tail is fine.
+        assert_eq!(shell_quote_path("~/"), "~/");
+        // Absolute paths fall through to shell_quote.
+        assert_eq!(shell_quote_path("/tmp/r"), "/tmp/r");
+        assert_eq!(shell_quote_path("/tmp/r d"), "'/tmp/r d'");
+        // A tilde in the middle of a path is not an expansion site —
+        // POSIX treats it literally — so it stays quoted.
+        assert_eq!(shell_quote_path("/foo/~bar"), "'/foo/~bar'");
     }
 
     #[test]
@@ -284,6 +336,21 @@ mod tests {
         assert!(cmd.contains("foo-abc"));
         assert!(cmd.contains("cargo"));
         assert!(cmd.ends_with(" test -p bar"));
+    }
+
+    #[test]
+    fn remote_cmd_tilde_remains_unquoted() {
+        // Regression test: previously this emitted `cd '~/rcargo-builds'/...`
+        // which created a literal `~` directory on the remote.
+        let cmd = build_remote_cargo_cmd(
+            "~/rcargo-builds",
+            "proj-abc",
+            &["build".into()],
+        );
+        assert!(
+            cmd.starts_with("cd ~/rcargo-builds/proj-abc &&"),
+            "expected unquoted tilde, got: {cmd}"
+        );
     }
 
     #[test]
